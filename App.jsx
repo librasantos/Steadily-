@@ -1,0 +1,856 @@
+import { useState, useEffect, useRef } from "react";
+
+const FONTS = `
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;1,400&family=DM+Sans:wght@300;400;500&display=swap');
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 0.35; }
+  50% { transform: scale(1.2); opacity: 0.9; }
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pop {
+  0%   { transform: scale(0.93); opacity: 0; }
+  65%  { transform: scale(1.02); opacity: 1; }
+  100% { transform: scale(1);    opacity: 1; }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50%       { opacity: 1;   transform: scale(1.1); }
+}
+`;
+
+const ENERGY = {
+  low:  { emoji: "🌧", label: "Low",  color: "#7B9EA8", bg: "#EEF4F6", max: 2 },
+  okay: { emoji: "🌿", label: "Okay", color: "#5A8A6E", bg: "#EEF5F1", max: 3 },
+  good: { emoji: "☀️", label: "Good", color: "#C4893A", bg: "#FBF4EA", max: 3 },
+};
+
+const TIMERS = [
+  { label: "5 min",  secs: 300  },
+  { label: "10 min", secs: 600  },
+  { label: "25 min", secs: 1500 },
+];
+
+const WINS = [
+  "That counts.",
+  "You did it.",
+  "One down.",
+  "That's real work.",
+  "Well done.",
+];
+
+const GROUNDS = [
+  "Take one breath.",
+  "Feel your feet on the floor.",
+  "Roll your shoulders back.",
+  "Unclench your jaw.",
+];
+
+const SOUNDS = [
+  { key: "rain",     label: "🌧 Rain"       },
+  { key: "ocean",    label: "🌊 Ocean"      },
+  { key: "white",    label: "🤍 White noise" },
+  { key: "brown",    label: "🟤 Brown noise" },
+  { key: "lofi",     label: "🎵 Lo-fi"      },
+  { key: "none",     label: "🔇 No sound"   },
+];
+
+const SESSION_KEY = "steadily_v2";
+const save = (d) => { try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(d)); } catch(e) {} };
+const load = () => { try { const d = sessionStorage.getItem(SESSION_KEY); return d ? JSON.parse(d) : null; } catch(e) { return null; } };
+const clear = () => { try { sessionStorage.removeItem(SESSION_KEY); } catch(e) {} };
+
+const DUMP_KEY = "steadily_dump";
+const saveDump = (items) => { try { localStorage.setItem(DUMP_KEY, JSON.stringify(items)); } catch(e) {} };
+const loadDump = () => { try { const d = localStorage.getItem(DUMP_KEY); return d ? JSON.parse(d) : []; } catch(e) { return []; } };
+
+function Orb({ color, size = 56, speed = "3.5s" }) {
+  return <div style={{ width: size, height: size, borderRadius: "50%", background: color || "#E0DDD8", animation: `breathe ${speed} ease-in-out infinite`, margin: "0 auto" }} />;
+}
+
+function CircleTimer({ seconds, total, color, done }) {
+  const r = 52, circ = 2 * Math.PI * r;
+  const offset = circ * (1 - seconds / total);
+  const m = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const s = String(seconds % 60).padStart(2, "0");
+  return (
+    <div style={{ position: "relative", width: 130, height: 130, margin: "0 auto 20px" }}>
+      <svg width="130" height="130" style={{ transform: "rotate(-90deg)" }}>
+        <circle cx="65" cy="65" r={r} fill="none" stroke="#ECEAE6" strokeWidth="4" />
+        <circle cx="65" cy="65" r={r} fill="none" stroke={done ? "#A8C5A0" : color} strokeWidth="4"
+          strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+          style={{ transition: "stroke-dashoffset 1s linear" }} />
+      </svg>
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <span style={{ fontFamily: "'Lora', serif", fontSize: "24px", color: done ? "#A8C5A0" : "#1C1C1C", letterSpacing: "-1px" }}>{m}:{s}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── SOUND ENGINE — CDN hosted, works everywhere ───────────────
+const SOUND_URLS = {
+  rain:  "https://cdn.pixabay.com/audio/2022/03/10/audio_1e695af41d.mp3",
+  ocean: "https://cdn.pixabay.com/audio/2022/03/15/audio_8cb3d2c1c9.mp3",
+  white: "https://cdn.pixabay.com/audio/2024/02/28/audio_0a9a3adefe.mp3",
+  brown: "https://cdn.pixabay.com/audio/2023/10/08/audio_cf959dee0f.mp3",
+  lofi:  "https://cdn.pixabay.com/audio/2024/11/26/audio_f37bf0f0ba.mp3",
+};
+
+let audioEl = null;
+
+function stopSound() {
+  if (audioEl) { audioEl.pause(); audioEl.src = ""; audioEl = null; }
+}
+
+function playSound(key) {
+  stopSound();
+  if (!key || key === "none" || !SOUND_URLS[key]) return;
+  audioEl = new Audio(SOUND_URLS[key]);
+  audioEl.loop = true;
+  audioEl.volume = 0.35;
+  audioEl.play().catch(() => {});
+}
+
+// ── NOTIFICATIONS ─────────────────────────────────────────────
+async function requestNotifPermission() {
+  if (typeof Notification === "undefined") return false;
+  if (Notification.permission === "granted") return true;
+  const result = await Notification.requestPermission();
+  return result === "granted";
+}
+
+function scheduleNotif(title, body, delayMs) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  setTimeout(() => {
+    try { new Notification(title, { body, icon: "/icon.png" }); } catch(e) {}
+  }, delayMs);
+}
+
+function scheduleDailyNotifs(morningHour = 8, middayHour = 12) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const now = new Date();
+  const morning = new Date(now); morning.setHours(morningHour, 0, 0, 0);
+  const midday  = new Date(now); midday.setHours(middayHour, 0, 0, 0);
+  if (morning > now) scheduleNotif("Steadily", "Ready when you are. 🌿", morning - now);
+  if (midday  > now) scheduleNotif("Steadily", "How's your energy? Take a breath.", midday - now);
+}
+
+function scheduleDeferredNotifs(deferredTasks) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const now = new Date();
+  deferredTasks.forEach(d => {
+    const target = new Date(d.date + "T09:00:00");
+    const delay = target - now;
+    if (delay > 0) scheduleNotif("Steadily", `Coming back today: ${d.task}`, delay);
+  });
+}
+
+export default function Steadily() {
+  const [phase, setPhase]         = useState("open");   // open | ready | checkin | tasks | focus | done
+  const [energy, setEnergy]       = useState(null);
+  const [tasks, setTasks]         = useState([]);
+  const [input, setInput]         = useState("");
+  const [done, setDone]           = useState([]);
+  const [deferred, setDeferred]   = useState([]);
+  const [deferDate, setDeferDate] = useState("");
+  const [timer, setTimer]         = useState(null);
+  const [secs, setSecs]           = useState(0);
+  const [running, setRunning]     = useState(false);
+  const [timerDone, setTimerDone] = useState(false);
+  const [mode, setMode]           = useState(null);  // null | didnt | breakdown | defer | avoidance | grounding | break | interrupted | posttimer
+  const [subtasks, setSubtasks]   = useState([]);
+  const [subInput, setSubInput]   = useState("");
+  const [win, setWin]             = useState(null);
+  const [breakSecs, setBreakSecs] = useState(0);
+  const [breakRun, setBreakRun]   = useState(false);
+  const [fade, setFade]           = useState(true);
+  const [saved, setSaved]         = useState(null);
+  const [showSkip, setShowSkip]   = useState(false);
+  const [addMoreInput, setAddMoreInput] = useState("");
+  const [dumpOpen, setDumpOpen]         = useState(false);
+  const [dumpItems, setDumpItems]       = useState(() => loadDump());
+  const [dumpInput, setDumpInput]       = useState("");
+  const [sound, setSound]               = useState(null);   // selected sound key
+  const [soundPlaying, setSoundPlaying] = useState(false);
+  const [notifGranted, setNotifGranted] = useState(false);
+  const [notifAsked, setNotifAsked]     = useState(false);
+
+  const tickRef  = useRef(null);
+  const breakRef = useRef(null);
+  const entryRef = useRef(null);
+
+  const cfg = energy ? ENERGY[energy] : null;
+  const c   = cfg?.color || "#888";
+  const bg  = cfg?.bg    || "#F5F3EF";
+
+  // Sound — start/stop with timer
+  useEffect(() => {
+    if (running && sound && sound !== "none") { playSound(sound); setSoundPlaying(true); }
+    else { stopSound(); setSoundPlaying(false); }
+    return () => stopSound();
+  }, [running, sound]);
+
+  // Schedule daily notifs on mount if already granted
+  useEffect(() => {
+    if (typeof Notification !== "undefined" && Notification?.permission === "granted") scheduleDailyNotifs();
+  }, []);
+
+  // Schedule deferred task notifs when deferred changes
+  useEffect(() => {
+    if (typeof Notification !== "undefined" && Notification?.permission === "granted") scheduleDeferredNotifs(deferred);
+  }, [deferred]);
+
+  // Persist dump
+  useEffect(() => { saveDump(dumpItems); }, [dumpItems]);
+
+  const addDumpItem = () => {
+    if (!dumpInput.trim()) return;
+    setDumpItems(p => [{ text: dumpInput.trim(), id: Date.now() }, ...p]);
+    setDumpInput("");
+  };
+
+  const removeDumpItem = (id) => setDumpItems(p => p.filter(i => i.id !== id));
+
+  const promoteToTask = (item) => {
+    if (tasks.length >= (cfg?.max || 3)) return;
+    setTasks(p => [...p, item.text]);
+    removeDumpItem(item.id);
+  };
+
+  // Entry
+  useEffect(() => {
+    const s = load();
+    if (s?.tasks?.length && s?.energy) setSaved(s);
+    setTimeout(() => setShowSkip(true), 1200);
+    entryRef.current = setTimeout(() => setPhase("ready"), 3000);
+    return () => clearTimeout(entryRef.current);
+  }, []);
+
+  // Save session
+  useEffect(() => {
+    if (phase === "focus" || phase === "tasks") save({ tasks, energy, done, deferred, timer });
+    if (phase === "done") clear();
+  }, [tasks, energy, phase]);
+
+  // Main timer
+  useEffect(() => {
+    if (running) {
+      tickRef.current = setInterval(() => {
+        setSecs(s => {
+          if (s <= 1) {
+            clearInterval(tickRef.current); setRunning(false); setTimerDone(true); setMode("posttimer");
+            scheduleNotif("Steadily", "Focus block done. How are you feeling?", 100);
+            return 0;
+          }
+          return s - 1;
+        });
+      }, 1000);
+    } else clearInterval(tickRef.current);
+    return () => clearInterval(tickRef.current);
+  }, [running]);
+
+  // Break timer
+  useEffect(() => {
+    if (breakRun) {
+      breakRef.current = setInterval(() => {
+        setBreakSecs(s => {
+          if (s <= 1) { clearInterval(breakRef.current); setBreakRun(false); setMode(null); setSecs(timer?.secs || 1500); setTimerDone(false); return 0; }
+          return s - 1;
+        });
+      }, 1000);
+    } else clearInterval(breakRef.current);
+    return () => clearInterval(breakRef.current);
+  }, [breakRun]);
+
+  const go = (next) => {
+    setFade(false);
+    setTimeout(() => { setPhase(next); setFade(true); }, 280);
+  };
+
+  const pickEnergy = (lv) => { setEnergy(lv); go("tasks"); };
+
+  const addTask = () => {
+    if (!input.trim() || tasks.length >= (cfg?.max || 3)) return;
+    setTasks(p => [...p, input.trim()]); setInput("");
+  };
+
+  const startFocus = async () => {
+    if (!timer) return;
+    // Ask for notification permission once
+    if (!notifAsked) {
+      setNotifAsked(true);
+      const granted = await requestNotifPermission();
+      setNotifGranted(granted);
+      if (granted) { scheduleDailyNotifs(); scheduleDeferredNotifs(deferred); }
+    }
+    setSecs(timer.secs); setRunning(true); setTimerDone(false); setMode(null);
+    go("focus");
+  };
+
+  const completeTask = () => {
+    const msg = WINS[done.length % WINS.length];
+    setWin(msg); clearInterval(tickRef.current); setRunning(false);
+    setTimeout(() => {
+      setWin(null);
+      const rest = tasks.slice(1);
+      setDone(p => [...p, tasks[0]]);
+      setTasks(rest); setTimerDone(false);
+      if (!rest.length) {
+        // No tasks left — offer to add one more before done
+        setMode("addmore");
+        setSecs(timer?.secs || 1500);
+        return;
+      }
+      // Tasks remain — grounding before next
+      const g = GROUNDS[Math.floor(Math.random() * GROUNDS.length)];
+      setMode("grounding_" + g);
+      setSecs(timer?.secs || 1500);
+    }, 2200);
+  };
+
+  const confirmDefer = () => {
+    if (!deferDate) return;
+    setDeferred(p => [...p, { task: tasks[0], date: deferDate }]);
+    const rest = tasks.slice(1);
+    setTasks(rest); setMode(null); setDeferDate("");
+    if (!rest.length) { clear(); go("done"); }
+  };
+
+  const confirmBreakdown = () => {
+    if (!subtasks.length) return;
+    setTasks([...subtasks, ...tasks.slice(1)]);
+    setMode(null); setSubtasks([]); setSubInput("");
+    setSecs(timer?.secs || 1500); setRunning(true); setTimerDone(false);
+  };
+
+  const startBreak = (mins) => {
+    setBreakSecs(mins * 60); setBreakRun(true); setMode("break");
+    clearInterval(tickRef.current); setRunning(false);
+  };
+
+  const resetApp = () => {
+    clear();
+    setPhase("open"); setEnergy(null); setTasks([]); setInput(""); setDone([]); setDeferred([]);
+    setDeferDate(""); setTimer(null); setSecs(0); setRunning(false); setTimerDone(false);
+    setMode(null); setSubtasks([]); setSubInput(""); setWin(null); setAddMoreInput(""); setDumpInput(""); setDumpOpen(false);
+    setSound(null); setSoundPlaying(false); stopSound();
+    setBreakSecs(0); setBreakRun(false); setSaved(null); setShowSkip(false);
+    clearInterval(tickRef.current); clearInterval(breakRef.current);
+    setTimeout(() => setShowSkip(true), 1200);
+    entryRef.current = setTimeout(() => setPhase("ready"), 3000);
+  };
+
+  // ── STYLES ──────────────────────────────────
+  const A = { // app
+    minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+    background: bg, transition: "background 0.7s ease",
+    fontFamily: "'DM Sans', sans-serif", padding: "32px 24px",
+  };
+  const card = {
+    width: "100%", maxWidth: "360px",
+    opacity: fade ? 1 : 0, transform: fade ? "translateY(0)" : "translateY(10px)",
+    transition: "opacity 0.3s ease, transform 0.3s ease",
+    animation: "slideUp 0.4s ease forwards",
+  };
+  const title = { fontFamily: "'Lora', serif", fontSize: "24px", fontWeight: "400", color: "#1C1C1C", lineHeight: "1.45", marginBottom: "8px" };
+  const sub   = { fontSize: "14px", fontWeight: "300", color: "#999", marginBottom: "28px", lineHeight: "1.6" };
+  const lbl   = { fontSize: "10px", letterSpacing: "2px", textTransform: "uppercase", color: "#BBBBBB", fontWeight: "500", marginBottom: "10px", display: "block" };
+  const btn   = (col) => ({ display: "inline-block", padding: "14px 32px", background: col || c, color: "white", border: "none", borderRadius: "50px", fontSize: "15px", fontFamily: "'DM Sans', sans-serif", fontWeight: "500", cursor: "pointer", letterSpacing: "0.2px" });
+  const ghost = (col) => ({ display: "inline-block", padding: "12px 24px", background: "transparent", color: col || "#BBBBBB", border: `1.5px solid ${col || "#E0DDD8"}`, borderRadius: "50px", fontSize: "14px", fontFamily: "'DM Sans', sans-serif", fontWeight: "300", cursor: "pointer" });
+  const inp   = { width: "100%", padding: "14px 18px", fontSize: "15px", fontFamily: "'DM Sans', sans-serif", fontWeight: "300", border: "1.5px solid #E8E4DE", borderRadius: "12px", outline: "none", background: "white", color: "#1C1C1C", boxSizing: "border-box" };
+  const card2 = (col) => ({ padding: "22px", background: "white", borderRadius: "16px", borderLeft: `3px solid ${col || c}`, boxShadow: "0 2px 16px rgba(0,0,0,0.05)", marginBottom: "20px" });
+  const row   = { display: "flex", gap: "10px", flexWrap: "wrap" };
+  const divider = { height: "1px", background: "#ECEAE6", margin: "20px 0" };
+  const overlay = { position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,0.95)", backdropFilter: "blur(8px)", zIndex: 100, flexDirection: "column", gap: "8px", animation: "pop 0.35s ease forwards" };
+
+  const isGrounding = typeof mode === "string" && mode.startsWith("grounding_");
+  const groundText  = isGrounding ? mode.replace("grounding_", "") : "";
+
+  // ── RENDER ───────────────────────────────────
+  return (
+    <>
+      <style>{FONTS}</style>
+      <div style={A}>
+
+        {/* WIN */}
+        {win && (
+          <div style={overlay}>
+            <div style={{ fontFamily: "'Lora', serif", fontSize: "28px", color: "#1C1C1C" }}>{win}</div>
+            <div style={{ fontSize: "14px", color: "#AAAAAA", fontWeight: "300" }}>Keep going.</div>
+          </div>
+        )}
+
+        <div style={card}>
+
+          {/* OPEN */}
+          {phase === "open" && (
+            <div style={{ textAlign: "center", animation: "fadeIn 1s ease forwards" }}>
+              <div style={{ fontFamily: "'Lora', serif", fontSize: "22px", color: "#AAAAAA", letterSpacing: "0.5px", marginBottom: "32px" }}>steadily</div>
+              <Orb size={60} speed="3.5s" />
+              <div style={{ fontFamily: "'Lora', serif", fontSize: "18px", color: "#BBBBBB", fontStyle: "italic", marginTop: "28px" }}>
+                You're here. That's already something.
+              </div>
+            </div>
+          )}
+
+          {/* READY */}
+          {phase === "ready" && (
+            <div style={{ textAlign: "center", animation: "slideUp 0.5s ease forwards" }}>
+              <div style={{ fontFamily: "'Lora', serif", fontSize: "22px", color: "#AAAAAA", letterSpacing: "0.5px", marginBottom: "40px" }}>steadily</div>
+              <Orb size={48} speed="3s" />
+              <div style={{ fontFamily: "'Lora', serif", fontSize: "20px", color: "#1C1C1C", marginTop: "28px", marginBottom: "8px" }}>Tap when you're ready.</div>
+              <div style={{ fontSize: "13px", color: "#CCCCCC", marginBottom: "36px" }}>No rush.</div>
+              {saved ? (
+                <div>
+                  <div style={{ background: "white", border: "1.5px solid #E8E4DE", borderRadius: "14px", padding: "16px 20px", marginBottom: "16px", textAlign: "left" }}>
+                    <div style={{ fontSize: "11px", color: "#BBBBBB", letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "10px" }}>You were working on</div>
+                    {saved.tasks.slice(0, 2).map((t, i) => <div key={i} style={{ fontSize: "14px", color: "#555", fontWeight: "300", marginBottom: "4px" }}>— {t}</div>)}
+                  </div>
+                  <div style={row}>
+                    <button style={btn(ENERGY[saved.energy]?.color)} onClick={() => { setEnergy(saved.energy); setTasks(saved.tasks); setDone(saved.done || []); setDeferred(saved.deferred || []); if (saved.timer) setTimer(saved.timer); go("focus"); }}>Continue →</button>
+                    <button style={ghost()} onClick={() => { clear(); setSaved(null); go("checkin"); }}>Start fresh</button>
+                  </div>
+                </div>
+              ) : (
+                <button style={btn("#1C1C1C")} onClick={() => go("checkin")}>I'm here</button>
+              )}
+            </div>
+          )}
+
+          {/* CHECK-IN */}
+          {phase === "checkin" && (
+            <div style={{ animation: "slideUp 0.4s ease forwards" }}>
+              <div style={title}>How's your energy?</div>
+              <div style={sub}>Go with your gut.</div>
+              <div style={{ display: "flex", gap: "10px" }}>
+                {["low", "okay", "good"].map(lv => (
+                  <button key={lv} onClick={() => pickEnergy(lv)} style={{ flex: 1, padding: "24px 8px", background: "white", border: "1.5px solid #E8E4DE", borderRadius: "16px", cursor: "pointer", textAlign: "center", fontFamily: "'DM Sans', sans-serif", transition: "border-color 0.15s ease" }}>
+                    <div style={{ fontSize: "26px", marginBottom: "8px" }}>{ENERGY[lv].emoji}</div>
+                    <div style={{ fontSize: "12px", color: "#999", fontWeight: "300" }}>{ENERGY[lv].label}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* TASKS */}
+          {phase === "tasks" && cfg && (
+            <div style={{ animation: "slideUp 0.4s ease forwards" }}>
+              <div style={title}>What needs to happen?</div>
+              <div style={sub}>Up to {cfg.max} things today.</div>
+
+              {tasks.length < cfg.max && (
+                <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+                  <input style={{ ...inp, flex: 1 }} placeholder="Add a task..." value={input}
+                    onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && addTask()} autoFocus />
+                  <button style={{ ...ghost(c), padding: "0 18px", fontSize: "20px", lineHeight: 1 }} onClick={addTask}>+</button>
+                </div>
+              )}
+
+              {tasks.map((t, i) => (
+                <div key={i} style={{ padding: "13px 16px", background: "white", border: "1.5px solid #E8E4DE", borderRadius: "12px", fontSize: "14px", color: "#1C1C1C", marginBottom: "8px", fontWeight: "300", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>{t}</span>
+                  <button onClick={() => setTasks(tasks.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#CCCCCC", fontSize: "16px", lineHeight: 1, padding: "0 0 0 12px" }}>×</button>
+                </div>
+              ))}
+
+              {tasks.length > 0 && (
+                <div style={{ marginTop: "24px" }}>
+                  <span style={lbl}>How long can you give?</span>
+                  <div style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
+                    {TIMERS.map(t => (
+                      <button key={t.label} onClick={() => { setTimer(t); setSecs(t.secs); }} style={{ flex: 1, padding: "13px 6px", borderRadius: "12px", border: `1.5px solid ${timer?.label === t.label ? c : "#E8E4DE"}`, background: timer?.label === t.label ? c : "white", color: timer?.label === t.label ? "white" : "#888", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", fontSize: "13px", fontWeight: "400", transition: "all 0.15s ease" }}>{t.label}</button>
+                    ))}
+                  </div>
+                  <button style={{ ...btn(c), opacity: timer ? 1 : 0.3 }} onClick={startFocus}>Start →</button>
+
+                  {/* Sound picker — after timer selected */}
+                  {timer && (
+                    <div style={{ marginTop: "24px" }}>
+                      <span style={lbl}>Focus sound</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                        {SOUNDS.map(s => (
+                          <button key={s.key} onClick={() => setSound(s.key)} style={{ padding: "8px 14px", borderRadius: "50px", border: `1.5px solid ${sound === s.key ? c : "#E8E4DE"}`, background: sound === s.key ? c : "white", color: sound === s.key ? "white" : "#888", fontSize: "12px", fontFamily: "'DM Sans', sans-serif", cursor: "pointer", transition: "all 0.15s ease" }}>
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* FOCUS */}
+          {phase === "focus" && (tasks.length > 0 || mode === "addmore") && (
+            <div style={{ animation: "slideUp 0.4s ease forwards" }}>
+
+              {/* BREAK */}
+              {mode === "break" && (
+                <div style={{ textAlign: "center" }}>
+                  <Orb size={54} speed="4s" />
+                  <div style={{ fontFamily: "'Lora', serif", fontSize: "28px", color: "#1C1C1C", margin: "24px 0 6px" }}>
+                    {String(Math.floor(breakSecs / 60)).padStart(2, "0")}:{String(breakSecs % 60).padStart(2, "0")}
+                  </div>
+                  <div style={{ fontSize: "14px", color: "#BBBBBB", fontWeight: "300", marginBottom: "32px" }}>Step away.</div>
+                  <button style={ghost()} onClick={() => { clearInterval(breakRef.current); setBreakRun(false); setMode(null); setSecs(timer?.secs || 1500); setTimerDone(false); }}>I'm back</button>
+                </div>
+              )}
+
+              {/* INTERRUPTED */}
+              {mode === "interrupted" && (
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: "14px", color: "#BBBBBB", fontWeight: "300", marginBottom: "20px" }}>Someone needed you. That's okay.</div>
+                  <div style={card2(c)}>
+                    <div style={{ fontFamily: "'Lora', serif", fontSize: "17px", color: "#1C1C1C" }}>{tasks[0]}</div>
+                  </div>
+                  <button style={btn(c)} onClick={() => { setMode(null); setRunning(true); }}>I'm back →</button>
+                </div>
+              )}
+
+              {/* GROUNDING */}
+              {isGrounding && (
+                <div style={{ textAlign: "center" }}>
+                  <Orb color={c + "44"} size={48} speed="4s" />
+                  <div style={{ fontFamily: "'Lora', serif", fontSize: "22px", color: "#1C1C1C", margin: "28px 0 32px", lineHeight: "1.5" }}>{groundText}</div>
+                  <div style={row}>
+                    <button style={btn(c)} onClick={() => { setMode(null); setRunning(true); }}>Ready →</button>
+                    <button style={ghost()} onClick={() => startBreak(2)}>Need a break</button>
+                  </div>
+                </div>
+              )}
+
+              {/* POST TIMER */}
+              {mode === "posttimer" && (
+                <div style={{ textAlign: "center" }}>
+                  <CircleTimer seconds={0} total={timer?.secs || 1500} color={c} done />
+                  <div style={{ fontFamily: "'Lora', serif", fontSize: "20px", color: "#1C1C1C", marginBottom: "6px" }}>Timer's done.</div>
+                  <div style={{ fontSize: "14px", color: "#BBBBBB", fontWeight: "300", marginBottom: "28px" }}>How are you feeling?</div>
+                  <div style={row}>
+                    <button style={btn(c)} onClick={() => { setMode(null); setSecs(timer?.secs || 1500); setRunning(true); setTimerDone(false); }}>Keep going</button>
+                    <button style={ghost()} onClick={() => startBreak(5)}>Take a break</button>
+                  </div>
+                </div>
+              )}
+
+              {/* DIDN'T DO IT */}
+              {mode === "didnt" && (
+                <div>
+                  <div style={title}>What's going on?</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {[
+                      { key: "breakdown", label: "It's too much" },
+                      { key: "avoidance", label: "I'm avoiding it" },
+                      { key: "defer",     label: "Not today" },
+                    ].map(opt => (
+                      <button key={opt.key} style={{ padding: "16px 18px", background: "white", border: "1.5px solid #E8E4DE", borderRadius: "12px", cursor: "pointer", textAlign: "left", fontSize: "15px", color: "#1C1C1C", fontFamily: "'DM Sans', sans-serif", fontWeight: "300" }}
+                        onClick={() => setMode(opt.key)}>{opt.label}</button>
+                    ))}
+                  </div>
+                  <button style={{ ...ghost(), marginTop: "16px" }} onClick={() => setMode(null)}>← Back</button>
+                </div>
+              )}
+
+              {/* AVOIDANCE */}
+              {mode === "avoidance" && (
+                <div>
+                  <div style={title}>That's information,<br />not failure.</div>
+                  <div style={sub}>Just the first 2 minutes. Don't think about finishing.</div>
+                  <div style={{ fontFamily: "'Lora', serif", fontSize: "17px", color: "#1C1C1C", padding: "18px", background: "white", borderRadius: "12px", borderLeft: `3px solid ${c}`, marginBottom: "20px" }}>
+                    Open it. Just open it.
+                  </div>
+                  <div style={row}>
+                    <button style={btn(c)} onClick={() => { setMode(null); setTimer({ label: "2 min", secs: 120 }); setSecs(120); setRunning(true); setTimerDone(false); }}>Start 2 min →</button>
+                    <button style={ghost()} onClick={() => setMode("defer")}>Not today</button>
+                  </div>
+                </div>
+              )}
+
+              {/* BREAKDOWN */}
+              {mode === "breakdown" && (
+                <div>
+                  <div style={title}>Break it down.</div>
+                  <div style={sub}>First physical action. 5–15 min each.</div>
+                  {subtasks.map((s, i) => (
+                    <div key={i} style={{ padding: "12px 16px", background: "white", border: "1.5px solid #E8E4DE", borderRadius: "12px", fontSize: "14px", color: "#1C1C1C", marginBottom: "8px", fontWeight: "300", display: "flex", justifyContent: "space-between" }}>
+                      <span><span style={{ color: c, marginRight: "8px", fontSize: "11px" }}>{i + 1}</span>{s}</span>
+                      <button onClick={() => setSubtasks(subtasks.filter((_, j) => j !== i))} style={{ background: "none", border: "none", cursor: "pointer", color: "#CCCCCC", fontSize: "16px" }}>×</button>
+                    </div>
+                  ))}
+                  {subtasks.length < 3 && (
+                    <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+                      <input style={{ ...inp, flex: 1, fontSize: "14px" }} placeholder="First small step..." value={subInput}
+                        onChange={e => setSubInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && subInput.trim() && subtasks.length < 3) { setSubtasks(p => [...p, subInput.trim()]); setSubInput(""); } }} autoFocus />
+                      <button style={{ ...ghost(c), padding: "0 16px", fontSize: "20px" }} onClick={() => { if (subInput.trim() && subtasks.length < 3) { setSubtasks(p => [...p, subInput.trim()]); setSubInput(""); } }}>+</button>
+                    </div>
+                  )}
+                  <div style={row}>
+                    {subtasks.length > 0 && <button style={btn(c)} onClick={confirmBreakdown}>Start step 1 →</button>}
+                    <button style={ghost()} onClick={() => { setMode(null); setSubtasks([]); setSubInput(""); }}>Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              {/* DEFER */}
+              {mode === "defer" && (
+                <div>
+                  <div style={title}>When should this come back?</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "14px" }}>
+                    {[1, 2, 3, 7].map(n => {
+                      const d = new Date(); d.setDate(d.getDate() + n);
+                      const val = d.toISOString().split("T")[0];
+                      const lbl2 = n === 1 ? "Tomorrow" : n === 7 ? "Next week" : d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                      return <button key={val} onClick={() => setDeferDate(val)} style={{ padding: "9px 16px", borderRadius: "50px", border: `1.5px solid ${deferDate === val ? c : "#E8E4DE"}`, background: deferDate === val ? c : "white", color: deferDate === val ? "white" : "#666", fontSize: "13px", fontFamily: "'DM Sans', sans-serif", cursor: "pointer", transition: "all 0.15s ease" }}>{lbl2}</button>;
+                    })}
+                  </div>
+                  <input type="date" style={{ ...inp, marginBottom: "16px", fontSize: "14px" }} value={deferDate}
+                    onChange={e => setDeferDate(e.target.value)} min={new Date(Date.now() + 86400000).toISOString().split("T")[0]} />
+                  <div style={row}>
+                    <button style={{ ...btn(c), opacity: deferDate ? 1 : 0.35 }} onClick={confirmDefer}>Set aside →</button>
+                    <button style={ghost()} onClick={() => { setMode(null); setDeferDate(""); }}>Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              {/* MAIN FOCUS — only shown when no mode active */}
+              {!mode && !isGrounding && (
+                <>
+                  {/* Body double + sound indicator */}
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: c, animation: "pulse 2.5s ease-in-out infinite", flexShrink: 0 }} />
+                      <span style={{ fontSize: "12px", color: c, fontWeight: "300" }}>You're not doing this alone.</span>
+                    </div>
+                    {sound && sound !== "none" && (
+                      <button onClick={() => {
+                        if (soundPlaying) { if (audioEl) audioEl.pause(); setSoundPlaying(false); }
+                        else { if (audioEl) audioEl.play().catch(()=>{}); else playSound(sound); setSoundPlaying(true); }
+                      }}
+                        style={{ background: "none", border: "none", fontSize: "16px", cursor: "pointer", opacity: soundPlaying ? 1 : 0.4 }} title={soundPlaying ? "Mute" : "Unmute"}>
+                        {soundPlaying ? "🔊" : "🔇"}
+                      </button>
+                    )}
+                  </div>
+
+                  <CircleTimer seconds={secs} total={timer?.secs || 1500} color={c} done={timerDone} />
+
+                  {/* Timer controls — minimal */}
+                  <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "28px" }}>
+                    {!running && !timerDone && (
+                      <button onClick={() => setRunning(true)} style={ghost(c)}>{secs === (timer?.secs || 1500) ? "▶ Start" : "▶ Resume"}</button>
+                    )}
+                    {running && <button onClick={() => setRunning(false)} style={ghost(c)}>⏸ Pause</button>}
+                    {(running || secs < (timer?.secs || 1500)) && (
+                      <button onClick={() => { setSecs(timer?.secs || 1500); setRunning(false); setTimerDone(false); }} style={{ background: "none", border: "none", fontSize: "12px", color: "#CCCCCC", cursor: "pointer", fontFamily: "'DM Sans', sans-serif" }}>↺</button>
+                    )}
+                  </div>
+
+                  {/* Re-entry whisper */}
+                  {!running && !timerDone && secs < (timer?.secs || 1500) && secs > 0 && (
+                    <div style={{ fontSize: "12px", color: "#CCCCCC", textAlign: "center", marginBottom: "16px" }}>Pick up where you left off.</div>
+                  )}
+
+                  {/* The task — the whole point */}
+                  <span style={lbl}>Right now</span>
+                  <div style={card2(c)}>
+                    <div style={{ fontFamily: "'Lora', serif", fontSize: "18px", color: "#1C1C1C", lineHeight: "1.55" }}>{tasks[0]}</div>
+                  </div>
+
+                  {/* Two buttons. That's it. */}
+                  <div style={{ ...row, marginBottom: "16px" }}>
+                    <button style={btn(c)} onClick={completeTask}>Done ✓</button>
+                    <button style={ghost()} onClick={() => setMode("didnt")}>Not yet</button>
+                  </div>
+
+                  {/* Interruption — tiny link, not a button */}
+                  <button onClick={() => { clearInterval(tickRef.current); setRunning(false); setMode("interrupted"); }} style={{ background: "none", border: "none", fontSize: "12px", color: "#CCCCCC", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", display: "block", marginBottom: "20px" }}>
+                    got interrupted
+                  </button>
+
+                  {/* Later tasks — collapsed, quiet */}
+                  {tasks.length > 1 && (
+                    <div style={{ fontSize: "12px", color: "#CCCCCC", cursor: "pointer" }} onClick={() => setMode("later")}>
+                      + {tasks.length - 1} more later
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* LATER VIEW */}
+              {mode === "later" && (
+                <div>
+                  <span style={lbl}>Later</span>
+                  {tasks.slice(1).map((t, i) => (
+                    <div key={i} style={{ padding: "13px 16px", background: "white", border: "1.5px solid #E8E4DE", borderRadius: "12px", fontSize: "14px", color: "#999", marginBottom: "8px", fontWeight: "300" }}>{t}</div>
+                  ))}
+                  <button style={{ ...ghost(), marginTop: "8px" }} onClick={() => setMode(null)}>← Back</button>
+                </div>
+              )}
+
+              {/* ADD MORE — momentum earned */}
+              {mode === "addmore" && (
+                <div style={{ animation: "slideUp 0.4s ease forwards" }}>
+                  <div style={{ fontFamily: "'Lora', serif", fontSize: "22px", color: "#1C1C1C", marginBottom: "8px" }}>
+                    You're in a good flow.
+                  </div>
+                  <div style={{ fontSize: "14px", color: "#BBBBBB", fontWeight: "300", marginBottom: "28px" }}>
+                    Want to add one more thing?
+                  </div>
+                  <div style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
+                    <input
+                      style={{ ...inp, flex: 1, fontSize: "14px" }}
+                      placeholder="One more task..."
+                      value={addMoreInput}
+                      onChange={e => setAddMoreInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter" && addMoreInput.trim()) {
+                          setTasks([addMoreInput.trim()]);
+                          setAddMoreInput("");
+                          const g = GROUNDS[Math.floor(Math.random() * GROUNDS.length)];
+                          setMode("grounding_" + g);
+                        }
+                      }}
+                      autoFocus
+                    />
+                    <button
+                      style={{ ...ghost(c), padding: "0 16px", fontSize: "20px" }}
+                      onClick={() => {
+                        if (!addMoreInput.trim()) return;
+                        setTasks([addMoreInput.trim()]);
+                        setAddMoreInput("");
+                        const g = GROUNDS[Math.floor(Math.random() * GROUNDS.length)];
+                        setMode("grounding_" + g);
+                      }}
+                    >+</button>
+                  </div>
+                  <button style={ghost()} onClick={() => { clear(); go("done"); }}>
+                    No, I'm done for now
+                  </button>
+                </div>
+              )}
+
+            </div>
+          )}
+
+          {/* DONE */}
+          {phase === "done" && (
+            <div style={{ textAlign: "center", animation: "slideUp 0.4s ease forwards" }}>
+              <div style={{ fontFamily: "'Lora', serif", fontSize: "20px", color: "#AAAAAA", letterSpacing: "0.5px", marginBottom: "36px" }}>steadily</div>
+              <div style={{ fontFamily: "'Lora', serif", fontSize: "26px", color: "#1C1C1C", marginBottom: "8px" }}>That's enough.</div>
+              <div style={{ fontSize: "14px", color: "#BBBBBB", fontWeight: "300", marginBottom: "6px" }}>You can stop here.</div>
+              <div style={{ fontSize: "13px", color: c, marginBottom: "32px" }}>{done.length} {done.length === 1 ? "thing" : "things"} done. That's not nothing.</div>
+
+              {deferred.length > 0 && (
+                <div style={{ textAlign: "left", marginBottom: "28px" }}>
+                  <span style={lbl}>Set aside</span>
+                  {deferred.map((d, i) => (
+                    <div key={i} style={{ padding: "12px 16px", background: "white", border: "1.5px solid #E8E4DE", borderRadius: "12px", fontSize: "13px", color: "#999", marginBottom: "8px", fontWeight: "300", display: "flex", justifyContent: "space-between" }}>
+                      <span>{d.task}</span>
+                      <span style={{ color: "#CCCCCC", marginLeft: "12px", whiteSpace: "nowrap" }}>
+                        {new Date(d.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <button style={ghost()} onClick={resetApp}>Tomorrow →</button>
+            </div>
+          )}
+
+        </div>
+
+        {/* Skip — always quiet, always there */}
+        {showSkip && ["open", "ready"].includes(phase) && (
+          <button style={{ position: "fixed", bottom: "24px", right: "24px", background: "none", border: "none", fontSize: "11px", color: "#CCCCCC", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", animation: "fadeIn 0.5s ease forwards" }}
+            onClick={() => { clearTimeout(entryRef.current); saved ? setPhase("ready") : go("checkin"); }}>
+            skip
+          </button>
+        )}
+
+        {/* DUMP ICON — corner, always accessible except during entry */}
+        {!["open", "ready", "checkin"].includes(phase) && !dumpOpen && (
+          <button
+            onClick={() => setDumpOpen(true)}
+            style={{ position: "fixed", bottom: "24px", right: "24px", width: "44px", height: "44px", borderRadius: "50%", background: "white", border: "1.5px solid #E8E4DE", boxShadow: "0 2px 12px rgba(0,0,0,0.08)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px", animation: "fadeIn 0.4s ease forwards" }}
+            title="Brain dump"
+          >
+            📥
+            {dumpItems.length > 0 && (
+              <div style={{ position: "absolute", top: "2px", right: "2px", width: "14px", height: "14px", borderRadius: "50%", background: c, fontSize: "9px", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'DM Sans', sans-serif", fontWeight: "500" }}>
+                {dumpItems.length > 9 ? "9+" : dumpItems.length}
+              </div>
+            )}
+          </button>
+        )}
+
+        {/* DUMP DRAWER */}
+        {dumpOpen && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.18)", zIndex: 200, display: "flex", alignItems: "flex-end", animation: "fadeIn 0.2s ease forwards" }}
+            onClick={(e) => { if (e.target === e.currentTarget) setDumpOpen(false); }}>
+            <div style={{ width: "100%", maxHeight: "80vh", background: "#F9F8F6", borderRadius: "20px 20px 0 0", padding: "24px 24px 40px", overflowY: "auto", animation: "slideUp 0.3s ease forwards" }}>
+
+              {/* Header */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                <div style={{ fontFamily: "'Lora', serif", fontSize: "20px", color: "#1C1C1C" }}>Brain dump</div>
+                <button onClick={() => setDumpOpen(false)} style={{ background: "none", border: "none", fontSize: "20px", color: "#CCCCCC", cursor: "pointer", lineHeight: 1 }}>×</button>
+              </div>
+              <div style={{ fontSize: "13px", color: "#BBBBBB", fontWeight: "300", marginBottom: "20px" }}>
+                Park anything here. It won't disappear.
+              </div>
+
+              {/* Input */}
+              <div style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
+                <input
+                  style={{ flex: 1, padding: "12px 16px", fontSize: "14px", fontFamily: "'DM Sans', sans-serif", fontWeight: "300", border: "1.5px solid #E8E4DE", borderRadius: "12px", outline: "none", background: "white", color: "#1C1C1C", boxSizing: "border-box" }}
+                  placeholder="What's on your mind?"
+                  value={dumpInput}
+                  onChange={e => setDumpInput(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && addDumpItem()}
+                  autoFocus
+                />
+                <button style={{ padding: "0 16px", background: c, color: "white", border: "none", borderRadius: "12px", fontSize: "20px", cursor: "pointer" }} onClick={addDumpItem}>+</button>
+              </div>
+
+              {/* Items */}
+              {dumpItems.length === 0 && (
+                <div style={{ fontSize: "13px", color: "#CCCCCC", fontWeight: "300", textAlign: "center", padding: "20px 0" }}>Nothing here yet. Add anything.</div>
+              )}
+
+              {dumpItems.map(item => (
+                <div key={item.id} style={{ padding: "13px 16px", background: "white", border: "1.5px solid #E8E4DE", borderRadius: "12px", marginBottom: "8px", display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span style={{ flex: 1, fontSize: "14px", color: "#1C1C1C", fontWeight: "300" }}>{item.text}</span>
+                  <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
+                    {/* Promote to today's tasks — only show during tasks or focus phase */}
+                    {["tasks", "focus"].includes(phase) && tasks.length < (cfg?.max || 3) && (
+                      <button
+                        onClick={() => { promoteToTask(item); setDumpOpen(false); }}
+                        style={{ fontSize: "11px", color: c, background: c + "18", border: "none", borderRadius: "50px", padding: "4px 10px", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", whiteSpace: "nowrap" }}
+                      >do today</button>
+                    )}
+                    <button onClick={() => removeDumpItem(item.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#CCCCCC", fontSize: "16px", lineHeight: 1 }}>×</button>
+                  </div>
+                </div>
+              ))}
+
+              {dumpItems.length > 0 && (
+                <button
+                  onClick={() => { if (window.confirm("Clear everything from your dump?")) setDumpItems([]); }}
+                  style={{ background: "none", border: "none", fontSize: "12px", color: "#CCCCCC", cursor: "pointer", fontFamily: "'DM Sans', sans-serif", marginTop: "12px", display: "block" }}
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+      </div>
+    </>
+  );
+}
